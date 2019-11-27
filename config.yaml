@@ -1,0 +1,7 @@
+redis_address: "127.0.0.1:6379"
+redis_expiration: 24
+graylog_host: "127.0.0.1"
+graylog_port: 12201
+msgraph_tenantID: "<TenantID>"
+msgraph_appID: "<applicationID>"
+msgraph_secretKey: "<secretkey>"
