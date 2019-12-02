@@ -76,6 +76,8 @@ type GELFInstance struct {
 	LocationState       string `json:"_location_state"`
 	LocationCountry     string `json:"_location_country"`
 	GeoData             string `json:"_geodata"`
+	StatusCode          int    `json:"_status_code"`
+	StatusDescripton    string `json:"_status_descripton"`
 }
 
 func main() {
@@ -200,6 +202,10 @@ func NewGelfLog(s msgraph.Signin, AppNameInGraylog string) ([]byte, error) {
 		gi.LocationCountry = d.Data.Geo.CountryCode
 		gi.GeoData = strconv.FormatFloat(d.Data.Geo.Latitude, 'f', 6, 64) + "," + strconv.FormatFloat(d.Data.Geo.Longitude, 'f', 6, 64)
 		gi.ShortMessage = s.UserDisplayName + " from " + gi.Location + " with " + gi.DeviceDetail + " via " + s.ResourceDisplayName
+	}
+	gi.StatusCode = s.Status.ErrorCode
+	if s.Status.ErrorCode != 0 {
+		gi.StatusDescripton = s.Status.FailureReason + s.Status.AdditionalDetails
 	}
 	gi.ClientAppUsed = s.ClientAppUsed
 	gi.ResourceDisplayName = s.ResourceDisplayName
