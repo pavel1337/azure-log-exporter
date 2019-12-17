@@ -13,6 +13,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"time"
@@ -29,6 +30,7 @@ type Config struct {
 	ApplicationID    string        `json:"msgraph_appID"`
 	SecretKey        string        `json:"msgraph_secretKey"`
 	AppNameInGraylog string        `json:"app_name_in_graylog"`
+	AbuseIPDBApiKey  string        `json:"abuseipdb_apikey"`
 }
 
 type IPLookUpData struct {
@@ -59,25 +61,42 @@ type IPLookUpData struct {
 }
 
 type GELFInstance struct {
-	Timestamp           int64  `json:"timestamp"`
-	ID                  string `json:"_signin_id"`
-	Host                string `json:"host"`
-	AppName             string `json:"application_name"`
-	ShortMessage        string `json:"short_message"`
-	UserPrincipalName   string `json:"_user_Principal_Name"`
-	UserDisplayName     string `json:"_user_Display_Name"`
-	AppDisplayName      string `json:"_app_Display_Name"`
-	IpAddress           string `json:"_Ip_Address"`
-	ClientAppUsed       string `json:"_client_App_Used"`
-	ResourceDisplayName string `json:"_resourse_Display_Name"`
-	DeviceDetail        string `json:"_device_detail"`
-	Location            string `json:"_location"`
-	LocationCity        string `json:"_location_city"`
-	LocationState       string `json:"_location_state"`
-	LocationCountry     string `json:"_location_country"`
-	GeoData             string `json:"_geodata"`
-	StatusCode          int    `json:"_status_code"`
-	StatusDescripton    string `json:"_status_descripton"`
+	Timestamp            int64  `json:"timestamp"`
+	ID                   string `json:"_signin_id"`
+	Host                 string `json:"host"`
+	AppName              string `json:"application_name"`
+	ShortMessage         string `json:"short_message"`
+	UserPrincipalName    string `json:"_user_Principal_Name"`
+	UserDisplayName      string `json:"_user_Display_Name"`
+	AppDisplayName       string `json:"_app_Display_Name"`
+	IpAddress            string `json:"_Ip_Address"`
+	ClientAppUsed        string `json:"_client_App_Used"`
+	ResourceDisplayName  string `json:"_resourse_Display_Name"`
+	DeviceDetail         string `json:"_device_detail"`
+	Location             string `json:"_location"`
+	LocationCity         string `json:"_location_city"`
+	LocationState        string `json:"_location_state"`
+	LocationCountry      string `json:"_location_country"`
+	GeoData              string `json:"_geodata"`
+	StatusCode           int    `json:"_status_code"`
+	StatusDescripton     string `json:"_status_descripton"`
+	AbuseConfidenceScore int    `json:"_abuseConfidenceScore"`
+	TotalReports         int    `json:"_totalReports"`
+}
+
+type AbuseIPDBData struct {
+	IPAddress            string    `json:"ipAddress"`
+	IsPublic             bool      `json:"isPublic"`
+	IPVersion            int       `json:"ipVersion"`
+	IsWhitelisted        bool      `json:"isWhitelisted"`
+	AbuseConfidenceScore int       `json:"abuseConfidenceScore"`
+	CountryCode          string    `json:"countryCode"`
+	UsageType            string    `json:"usageType"`
+	Isp                  string    `json:"isp"`
+	Domain               string    `json:"domain"`
+	TotalReports         int       `json:"totalReports"`
+	NumDistinctUsers     int       `json:"numDistinctUsers"`
+	LastReportedAt       time.Time `json:"lastReportedAt"`
 }
 
 func main() {
@@ -123,7 +142,7 @@ func main() {
 				if err != nil {
 					log.Println(err)
 				}
-				msg, _ := NewGelfLog(signin, c.AppNameInGraylog)
+				msg, _ := NewGelfLog(signin, c.AppNameInGraylog, c.AbuseIPDBApiKey)
 				g.Log(string(msg))
 			}
 		}
@@ -170,7 +189,7 @@ func Ipv6LookUp(ip string) IPLookUpData {
 	return data
 }
 
-func NewGelfLog(s msgraph.Signin, AppNameInGraylog string) ([]byte, error) {
+func NewGelfLog(s msgraph.Signin, AppNameInGraylog string, abuseipdb_apikey string) ([]byte, error) {
 	gi := GELFInstance{}
 	gi.Timestamp = s.CreatedDateTime.Unix()
 	hn, err := os.Hostname()
@@ -203,6 +222,11 @@ func NewGelfLog(s msgraph.Signin, AppNameInGraylog string) ([]byte, error) {
 		gi.GeoData = strconv.FormatFloat(d.Data.Geo.Latitude, 'f', 6, 64) + "," + strconv.FormatFloat(d.Data.Geo.Longitude, 'f', 6, 64)
 		gi.ShortMessage = s.UserDisplayName + " from " + gi.Location + " with " + gi.DeviceDetail + " via " + s.ResourceDisplayName
 	}
+
+	abuseipdb := GetAbuseIPDBData(s.IpAddress, abuseipdb_apikey)
+	gi.AbuseConfidenceScore = abuseipdb.AbuseConfidenceScore
+	gi.TotalReports = abuseipdb.TotalReports
+
 	gi.StatusCode = s.Status.ErrorCode
 	if s.Status.ErrorCode != 0 {
 		gi.StatusDescripton = s.Status.FailureReason + s.Status.AdditionalDetails
@@ -212,6 +236,44 @@ func NewGelfLog(s msgraph.Signin, AppNameInGraylog string) ([]byte, error) {
 
 	message, err := json.Marshal(gi)
 	return message, err
+}
+
+func GetAbuseIPDBData(ip string, apikey string) AbuseIPDBData {
+	baseUrl, _ := url.Parse("https://api.abuseipdb.com/api/v2/check")
+	params := url.Values{}
+	params.Add("ipAddress", ip)
+	params.Add("maxAgeInDays", "365")
+	baseUrl.RawQuery = params.Encode()
+
+	req, err := http.NewRequest("GET", baseUrl.String(), nil)
+	if err != nil {
+		log.Panic("client error:", err)
+	}
+
+	req.Header.Set("Key", apikey)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, getErr := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Panic("request error:", getErr)
+	}
+	defer resp.Body.Close()
+
+	respBody, readErr := ioutil.ReadAll(resp.Body)
+	if readErr != nil {
+		log.Panic("response error:", readErr)
+	}
+
+	var marsh struct {
+		AbuseIPDBData AbuseIPDBData `json:"data"`
+	}
+	jsonErr := json.Unmarshal(respBody, &marsh)
+	if jsonErr != nil {
+		log.Panic("json parse error:", jsonErr)
+	}
+
+	return marsh.AbuseIPDBData
 }
 
 func IsIpv4Net(host string) bool {
