@@ -82,6 +82,7 @@ type GELFInstance struct {
 	StatusDescripton     string `json:"_status_descripton"`
 	AbuseConfidenceScore int    `json:"_abuseConfidenceScore"`
 	TotalReports         int    `json:"_totalReports"`
+	Isp                  string `json:"_ipinfo_isp"`
 }
 
 type AbuseIPDBData struct {
@@ -142,7 +143,7 @@ func main() {
 				if err != nil {
 					log.Println(err)
 				}
-				msg, _ := NewGelfLog(signin, c.AppNameInGraylog, c.AbuseIPDBApiKey)
+				msg, _ := NewGelfLog(signin, c)
 				g.Log(string(msg))
 			}
 		}
@@ -189,7 +190,7 @@ func Ipv6LookUp(ip string) IPLookUpData {
 	return data
 }
 
-func NewGelfLog(s msgraph.Signin, AppNameInGraylog string, abuseipdb_apikey string) ([]byte, error) {
+func NewGelfLog(s msgraph.Signin, c Config) ([]byte, error) {
 	gi := GELFInstance{}
 	gi.Timestamp = s.CreatedDateTime.Unix()
 	hn, err := os.Hostname()
@@ -197,7 +198,7 @@ func NewGelfLog(s msgraph.Signin, AppNameInGraylog string, abuseipdb_apikey stri
 		fmt.Errorf("Hostname problem: %v", err)
 		os.Exit(1)
 	}
-	gi.AppName = AppNameInGraylog
+	gi.AppName = c.AppNameInGraylog
 	gi.Host = hn
 	gi.DeviceDetail = s.DeviceDetail.OperatingSystem + " " + s.DeviceDetail.Browser
 	gi.ID = s.ID
@@ -223,10 +224,10 @@ func NewGelfLog(s msgraph.Signin, AppNameInGraylog string, abuseipdb_apikey stri
 		gi.ShortMessage = s.UserDisplayName + " from " + gi.Location + " with " + gi.DeviceDetail + " via " + s.ResourceDisplayName
 	}
 
-	abuseipdb := GetAbuseIPDBData(s.IpAddress, abuseipdb_apikey)
+	abuseipdb := GetAbuseIPDBData(s.IpAddress, c)
 	gi.AbuseConfidenceScore = abuseipdb.AbuseConfidenceScore
 	gi.TotalReports = abuseipdb.TotalReports
-
+	gi.Isp = abuseipdb.Isp
 	gi.StatusCode = s.Status.ErrorCode
 	if s.Status.ErrorCode != 0 {
 		gi.StatusDescripton = s.Status.FailureReason + s.Status.AdditionalDetails
@@ -238,7 +239,44 @@ func NewGelfLog(s msgraph.Signin, AppNameInGraylog string, abuseipdb_apikey stri
 	return message, err
 }
 
-func GetAbuseIPDBData(ip string, apikey string) AbuseIPDBData {
+func GetAbuseIPDBData(ip string, c Config) AbuseIPDBData {
+	rc := redis.NewClient(&redis.Options{
+		Addr:     c.RedisAddress,
+		Password: "", // no password set
+		DB:       2,  // use default DB
+	})
+	dur := 48 * time.Hour
+
+	i, err := rc.Exists(ip).Result()
+	if err != nil {
+		log.Println(err)
+	}
+	var aipdbdata []byte
+	if i == 0 {
+		aipdbdata = GetAbuseIPDBDataFromApi(ip, c.AbuseIPDBApiKey)
+		_, err := rc.Set(ip, aipdbdata, dur).Result()
+		if err != nil {
+			log.Println(err)
+		}
+	} else {
+		aipdbdata, err = rc.Get(ip).Bytes()
+		if err != nil {
+			log.Println(err)
+		}
+	}
+
+	var marsh struct {
+		AbuseIPDBData AbuseIPDBData `json:"data"`
+	}
+	jsonErr := json.Unmarshal(aipdbdata, &marsh)
+	if jsonErr != nil {
+		log.Panic("json parse error:", jsonErr)
+	}
+
+	return marsh.AbuseIPDBData
+}
+
+func GetAbuseIPDBDataFromApi(ip string, apikey string) []byte {
 	baseUrl, _ := url.Parse("https://api.abuseipdb.com/api/v2/check")
 	params := url.Values{}
 	params.Add("ipAddress", ip)
@@ -264,16 +302,7 @@ func GetAbuseIPDBData(ip string, apikey string) AbuseIPDBData {
 	if readErr != nil {
 		log.Panic("response error:", readErr)
 	}
-
-	var marsh struct {
-		AbuseIPDBData AbuseIPDBData `json:"data"`
-	}
-	jsonErr := json.Unmarshal(respBody, &marsh)
-	if jsonErr != nil {
-		log.Panic("json parse error:", jsonErr)
-	}
-
-	return marsh.AbuseIPDBData
+	return respBody
 }
 
 func IsIpv4Net(host string) bool {
