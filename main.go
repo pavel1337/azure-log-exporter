@@ -5,18 +5,19 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"github.com/ghodss/yaml"
-	"github.com/go-redis/redis"
-	"github.com/pavel1337/go-msgraph"
-	"github.com/robertkowalski/graylog-golang"
 	"io/ioutil"
 	"log"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"time"
+
+	"github.com/ghodss/yaml"
+	"github.com/go-redis/redis"
+	"github.com/pavel1337/go-msgraph"
+	gelf "github.com/robertkowalski/graylog-golang"
 )
 
 var pathError *os.PathError
@@ -153,7 +154,92 @@ func main() {
 
 }
 
-func Ipv6LookUp(ip string) IPLookUpData {
+func NewGelfLog(s msgraph.Signin, c Config) ([]byte, error) {
+	gi := GELFInstance{}
+	gi.Timestamp = s.CreatedDateTime.Unix()
+	hn, err := os.Hostname()
+	if err != nil {
+		fmt.Errorf("Hostname problem: %v", err)
+		os.Exit(1)
+	}
+	gi.AppName = c.AppNameInGraylog
+	gi.Host = hn
+	gi.DeviceDetail = s.DeviceDetail.OperatingSystem + " " + s.DeviceDetail.Browser
+	gi.ID = s.ID
+	gi.UserDisplayName = s.UserDisplayName
+	gi.UserPrincipalName = s.UserPrincipalName
+	gi.AppDisplayName = s.AppDisplayName
+	if s.Location.City != "" {
+		gi.IpAddress = s.IpAddress
+		gi.Location = strings.ToLower(s.Location.City + " " + s.Location.State + " " + s.Location.CountryOrRegion)
+		gi.LocationCity = strings.ToLower(s.Location.City)
+		gi.LocationState = strings.ToLower(s.Location.State)
+		gi.LocationCountry = strings.ToLower(s.Location.CountryOrRegion)
+		gi.GeoData = strconv.FormatFloat(s.Location.GeoCoordinates.Latitude, 'f', 6, 64) + "," + strconv.FormatFloat(s.Location.GeoCoordinates.Longitude, 'f', 6, 64)
+		gi.ShortMessage = s.UserDisplayName + " from " + gi.Location + " with " + gi.DeviceDetail + " via " + s.ResourceDisplayName
+	} else {
+		d := Ipv6LookUp(s.IpAddress, c)
+		gi.IpAddress = s.IpAddress
+		gi.Location = strings.ToLower(d.Data.Geo.City + " " + d.Data.Geo.RegionName + " " + d.Data.Geo.CountryCode)
+		gi.LocationCity = strings.ToLower(d.Data.Geo.City)
+		gi.LocationState = strings.ToLower(d.Data.Geo.RegionName)
+		gi.LocationCountry = strings.ToLower(d.Data.Geo.CountryCode)
+		gi.GeoData = strconv.FormatFloat(d.Data.Geo.Latitude, 'f', 6, 64) + "," + strconv.FormatFloat(d.Data.Geo.Longitude, 'f', 6, 64)
+		gi.ShortMessage = s.UserDisplayName + " from " + gi.Location + " with " + gi.DeviceDetail + " via " + s.ResourceDisplayName
+	}
+
+	abuseipdb := GetAbuseIPDBData(s.IpAddress, c)
+	gi.AbuseConfidenceScore = abuseipdb.AbuseConfidenceScore
+	gi.TotalReports = abuseipdb.TotalReports
+	gi.Isp = abuseipdb.Isp
+	gi.StatusCode = s.Status.ErrorCode
+	if s.Status.ErrorCode != 0 {
+		gi.StatusDescripton = s.Status.FailureReason + s.Status.AdditionalDetails
+	}
+	gi.ClientAppUsed = s.ClientAppUsed
+	gi.ResourceDisplayName = s.ResourceDisplayName
+
+	message, err := json.Marshal(gi)
+	return message, err
+}
+
+func Ipv6LookUp(ip string, c Config) IPLookUpData {
+	rc := redis.NewClient(&redis.Options{
+		Addr:     c.RedisAddress,
+		Password: "", // no password set
+		DB:       3,  // use default DB
+	})
+
+	dur := 168 * time.Hour
+
+	i, err := rc.Exists(ip).Result()
+	if err != nil {
+		log.Println(err)
+	}
+	var keycdngeodata []byte
+	if i == 0 {
+		keycdngeodata = Ipv6LookUpFromApi(ip)
+		_, err := rc.Set(ip, keycdngeodata, dur).Result()
+		if err != nil {
+			log.Println(err)
+		}
+	} else {
+		keycdngeodata, err = rc.Get(ip).Bytes()
+		if err != nil {
+			log.Println(err)
+		}
+	}
+
+	data := IPLookUpData{}
+	jsonErr := json.Unmarshal(keycdngeodata, &data)
+	if jsonErr != nil {
+		log.Panic("json parse error:", jsonErr)
+	}
+
+	return data
+}
+
+func Ipv6LookUpFromApi(ip string) []byte {
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -181,62 +267,7 @@ func Ipv6LookUp(ip string) IPLookUpData {
 		log.Panic("response error:", readErr)
 	}
 
-	data := IPLookUpData{}
-	jsonErr := json.Unmarshal(body, &data)
-	if jsonErr != nil {
-		log.Panic("json parse error:", jsonErr)
-	}
-
-	return data
-}
-
-func NewGelfLog(s msgraph.Signin, c Config) ([]byte, error) {
-	gi := GELFInstance{}
-	gi.Timestamp = s.CreatedDateTime.Unix()
-	hn, err := os.Hostname()
-	if err != nil {
-		fmt.Errorf("Hostname problem: %v", err)
-		os.Exit(1)
-	}
-	gi.AppName = c.AppNameInGraylog
-	gi.Host = hn
-	gi.DeviceDetail = s.DeviceDetail.OperatingSystem + " " + s.DeviceDetail.Browser
-	gi.ID = s.ID
-	gi.UserDisplayName = s.UserDisplayName
-	gi.UserPrincipalName = s.UserPrincipalName
-	gi.AppDisplayName = s.AppDisplayName
-	if IsIpv4Net(s.IpAddress) {
-		gi.IpAddress = s.IpAddress
-		gi.Location = s.Location.City + " " + s.Location.State + " " + s.Location.CountryOrRegion
-		gi.LocationCity = s.Location.City
-		gi.LocationState = s.Location.State
-		gi.LocationCountry = s.Location.CountryOrRegion
-		gi.GeoData = strconv.FormatFloat(s.Location.GeoCoordinates.Latitude, 'f', 6, 64) + "," + strconv.FormatFloat(s.Location.GeoCoordinates.Longitude, 'f', 6, 64)
-		gi.ShortMessage = s.UserDisplayName + " from " + gi.Location + " with " + gi.DeviceDetail + " via " + s.ResourceDisplayName
-	} else {
-		d := Ipv6LookUp(s.IpAddress)
-		gi.IpAddress = s.IpAddress
-		gi.Location = d.Data.Geo.City + " " + d.Data.Geo.RegionName + " " + d.Data.Geo.CountryCode
-		gi.LocationCity = d.Data.Geo.City
-		gi.LocationState = d.Data.Geo.RegionName
-		gi.LocationCountry = d.Data.Geo.CountryCode
-		gi.GeoData = strconv.FormatFloat(d.Data.Geo.Latitude, 'f', 6, 64) + "," + strconv.FormatFloat(d.Data.Geo.Longitude, 'f', 6, 64)
-		gi.ShortMessage = s.UserDisplayName + " from " + gi.Location + " with " + gi.DeviceDetail + " via " + s.ResourceDisplayName
-	}
-
-	abuseipdb := GetAbuseIPDBData(s.IpAddress, c)
-	gi.AbuseConfidenceScore = abuseipdb.AbuseConfidenceScore
-	gi.TotalReports = abuseipdb.TotalReports
-	gi.Isp = abuseipdb.Isp
-	gi.StatusCode = s.Status.ErrorCode
-	if s.Status.ErrorCode != 0 {
-		gi.StatusDescripton = s.Status.FailureReason + s.Status.AdditionalDetails
-	}
-	gi.ClientAppUsed = s.ClientAppUsed
-	gi.ResourceDisplayName = s.ResourceDisplayName
-
-	message, err := json.Marshal(gi)
-	return message, err
+	return body
 }
 
 func GetAbuseIPDBData(ip string, c Config) AbuseIPDBData {
@@ -303,14 +334,6 @@ func GetAbuseIPDBDataFromApi(ip string, apikey string) []byte {
 		log.Panic("response error:", readErr)
 	}
 	return respBody
-}
-
-func IsIpv4Net(host string) bool {
-	testInput := net.ParseIP(host)
-	if testInput.To4() == nil {
-		return false
-	}
-	return true
 }
 
 func parseFlags() *string {
