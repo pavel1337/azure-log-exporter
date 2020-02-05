@@ -187,7 +187,6 @@ func NewGelfLog(s msgraph.Signin, c Config) ([]byte, error) {
 		gi.GeoData = strconv.FormatFloat(d.Data.Geo.Latitude, 'f', 6, 64) + "," + strconv.FormatFloat(d.Data.Geo.Longitude, 'f', 6, 64)
 		gi.ShortMessage = s.UserDisplayName + " from " + gi.Location + " with " + gi.DeviceDetail + " via " + s.ResourceDisplayName
 	}
-
 	abuseipdb := GetAbuseIPDBData(s.IpAddress, c)
 	gi.AbuseConfidenceScore = abuseipdb.AbuseConfidenceScore
 	gi.TotalReports = abuseipdb.TotalReports
