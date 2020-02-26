@@ -7,6 +7,7 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -96,7 +97,7 @@ func main() {
 	g := gelf.New(gc)
 
 	for i := 1; i <= 3; i++ {
-		_, err = redisNewRc(c.RedisAddress, 1).Ping().Result()
+		_, err = redisNewRc(c.RedisAddress, i).Ping().Result()
 		if err != nil {
 			errorLog.Println(err)
 			return
@@ -119,24 +120,24 @@ func main() {
 		filter := "createdDateTime ge " + t.Format("2006-01-02T15:04:05Z")
 		signins, err := app.msGraphClient.ListSignInsWithFilter(filter)
 		if err != nil {
-			app.errorLog.Println(err)
+			app.errorLog.Println(trimSpaceNewlineInString(err.Error()))
 			continue
 		}
 		for _, signin := range signins {
 			i, err := app.rcLogins.Exists(signin.ID).Result()
 			if err != nil {
-				app.errorLog.Println(err)
+				app.errorLog.Println(trimSpaceNewlineInString(err.Error()))
 				continue
 			}
 			if i == 0 {
-				_, err := app.rcLogins.Set(signin.ID, 1, (time.Hour * 48)).Result()
-				if err != nil {
-					app.errorLog.Println(err)
-					continue
-				}
 				msg, err := app.NewGelfLog(signin)
 				if err != nil {
-					app.errorLog.Println(err)
+					app.errorLog.Println(trimSpaceNewlineInString(err.Error()))
+					continue
+				}
+				_, err = app.rcLogins.Set(signin.ID, 1, (time.Hour * 48)).Result()
+				if err != nil {
+					app.errorLog.Println(trimSpaceNewlineInString(err.Error()))
 					continue
 				}
 				g.Log(string(msg))
@@ -225,4 +226,9 @@ func parseConfig(p string) (Config, error) {
 		return c, err
 	}
 	return c, nil
+}
+
+func trimSpaceNewlineInString(s string) string {
+	re := regexp.MustCompile(` +\r?\n +`)
+	return re.ReplaceAllString(s, " ")
 }
